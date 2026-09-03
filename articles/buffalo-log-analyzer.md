@@ -3,7 +3,7 @@ title: "Buffaloルーターのログを可視化してWi-Fi/DHCPの不調を切�
 emoji: "📶"
 type: "tech"
 topics: ["javascript", "network", "dhcp", "githubpages", "svg"]
-published: false
+published: true
 ---
 
 Buffalo AirStation のログを読み込んで、イベントの頻度・異常が起きた時間帯・DHCPやWi-Fiの不安定さを可視化するツールを作りました。ブラウザだけで動きます。

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buffalo ログ解析ツール</title>
+<meta name="description" content="Buffalo AirStation のログを読み込み、イベント頻度・異常の時間帯・DHCP/Wi-Fiの不安定さを可視化してトラブルシュートに使うツール。解析はブラウザ内で完結します。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📶</text></svg>">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="head">
+    <div>
+      <h1>Buffalo ログ解析ツール</h1>
+      <p>AirStation のログからイベント頻度と異常の時間帯を可視化します。解析はすべてブラウザ内で行われ、ログは外部に送信されません。</p>
+    </div>
+    <div class="head-actions">
+      <button id="theme-toggle" title="表示テーマを切り替え">🌓 テーマ</button>
+      <button id="reset" hidden>別のログを読む</button>
+    </div>
+  </header>
+
+  <!-- 投入エリア -->
+  <section id="intake">
+    <div class="drop" id="drop">
+      <h2>ログファイルをここにドロップ</h2>
+      <p>AirStation の設定画面から保存したログファイル（.log / .txt）。複数まとめて投入すると、AP機とルーター機を同一時間軸で比較できます。</p>
+      <div class="drop-btns">
+        <button class="primary" id="pick">ファイルを選ぶ</button>
+        <button id="demo">サンプルログで試す</button>
+      </div>
+      <input type="file" id="file" accept=".log,.txt,text/plain" multiple hidden>
+      <p class="privacy">🔒 ファイルは端末内で解析されます。アップロードは行われません。<br>
+      サンプルは実際の障害ログを匿名化したもので、DHCP が不安定になった日の様子が入っています。</p>
+    </div>
+  </section>
+
+  <!-- 解析結果 -->
+  <main id="result" hidden>
+    <div class="filters" id="filters">
+      <div class="chips" id="file-tags"></div>
+      <span class="spacer"></span>
+      <label for="range">期間</label>
+      <select id="range">
+        <option value="all">全期間</option>
+        <option value="1">直近24時間</option>
+        <option value="3">直近3日</option>
+        <option value="7">直近7日</option>
+        <option value="30">直近30日</option>
+      </select>
+      <label for="bucket">粒度</label>
+      <select id="bucket">
+        <option value="300000">5分</option>
+        <option value="1800000">30分</option>
+        <option value="3600000" selected>1時間</option>
+        <option value="21600000">6時間</option>
+        <option value="86400000">1日</option>
+      </select>
+      <div class="chips" id="kind-chips"></div>
+      <span class="hint-inline" id="range-note" style="flex-basis:100%"></span>
+    </div>
+
+    <div class="kpis" id="kpis"></div>
+
+    <section class="card">
+      <h2>診断サマリ</h2>
+      <p class="sub">ログから読み取れるトラブルの兆候。上にあるものほど優先度が高い。</p>
+      <div id="findings"></div>
+    </section>
+
+    <section class="card">
+      <h2>イベント発生の推移</h2>
+      <p class="sub">種別ごとの内訳。赤い帯は、平常時と比べてイベントが突出している時間帯。</p>
+      <div class="chart-wrap" id="chart-timeline"></div>
+      <div class="legend" id="legend-timeline"></div>
+      <p class="hint-inline" id="scroll-note" style="margin:8px 0 0"></p>
+    </section>
+
+    <section class="card" id="card-compare">
+      <h2>機器ごとの比較</h2>
+      <p class="sub">同じ時間軸で機器を並べる。同時刻に両方で異常が出ていれば、原因は個々の機器ではなく上位側。</p>
+      <div class="chart-wrap" id="chart-compare"></div>
+      <div class="legend" id="legend-compare"></div>
+    </section>
+
+    <section class="card">
+      <h2>曜日・時刻ごとの傾向</h2>
+      <p class="sub">「毎朝この時間に落ちる」といった周期性を確認する。</p>
+      <div class="chart-wrap" id="chart-heatmap"></div>
+    </section>
+
+    <section class="card">
+      <div class="tabs" id="tabs">
+        <button class="tab" data-tab="events" aria-selected="true">イベント頻度</button>
+        <button class="tab" data-tab="clients" aria-selected="false">子機ごと</button>
+        <button class="tab" data-tab="anomalies" aria-selected="false">異常の時間帯</button>
+      </div>
+      <div id="tab-events">
+        <p class="sub">発生件数の内訳。数値はグラフのホバーだけでなくこの表からも読める。</p>
+        <div class="table-scroll"><table id="table-events"></table></div>
+      </div>
+      <div id="tab-clients" hidden>
+        <p class="sub">子機（MACアドレス）ごとの挙動。特定の端末が原因かを切り分ける。</p>
+        <div class="table-scroll"><table id="table-clients"></table></div>
+      </div>
+      <div id="tab-anomalies" hidden>
+        <p class="sub">イベントが平常時より突出していた時間帯。現場で起きたことと突き合わせる。</p>
+        <div class="table-scroll"><table id="table-anomalies"></table></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>元のログを確認する</h2>
+      <p class="sub">気になる時間帯のログをそのまま読む。</p>
+      <div class="filters" style="margin-bottom:12px">
+        <label for="raw-from">時刻</label>
+        <select id="raw-anchor"></select>
+        <span class="hint-inline">前後の生ログを表示します</span>
+      </div>
+      <pre class="rawlog" id="rawlog">時刻を選ぶとログを表示します。</pre>
+    </section>
+
+    <p class="hint-inline" id="parse-note"></p>
+  </main>
+</div>
+<script type="module" src="src/app.js"></script>
+</body>
+</html>

@@ -522,3 +522,57 @@ function deviceName(meta, i) {
   const base = meta.fileName.replace(/\.log$/i, '');
   return meta.role ? `${meta.role}機` : (base || `機器${i + 1}`);
 }
+
+/**
+ * 子機×時刻のマトリクス。全期間を時刻(0〜23)で重ねて集計する。
+ * 「この子機は毎朝8時に集中している」といった周期性を子機単位で見つけるため。
+ * @param {Array} events
+ * @param {number} limit 上位何台までを対象にするか
+ */
+export function clientHourMatrix(events, { limit = 30, minTotal = 2 } = {}) {
+  const map = new Map();
+  for (const e of events) {
+    const mac = e.fields.mac;
+    if (!mac) continue;
+    let row = map.get(mac);
+    if (!row) {
+      row = { mac, host: '', hours: new Array(24).fill(0), total: 0, first: e.t, last: e.t };
+      map.set(mac, row);
+    }
+    if (e.fields.host && !row.host) row.host = e.fields.host;
+    row.hours[e.ts.getHours()]++;
+    row.total++;
+    row.first = Math.min(row.first, e.t);
+    row.last = Math.max(row.last, e.t);
+  }
+
+  const rows = [...map.values()]
+    .filter(r => r.total >= minTotal)
+    .sort((a, b) => b.total - a.total)
+    .slice(0, limit);
+
+  // 各行のピーク時刻と、活動が特定時刻に偏っているかを添える。
+  for (const r of rows) {
+    const peak = r.hours.reduce((best, v, h) => v > r.hours[best] ? h : best, 0);
+    r.peakHour = peak;
+    r.peakCount = r.hours[peak];
+    // 活動している時刻数。少なければ特定の時間帯に偏っている。
+    r.activeHours = r.hours.filter(v => v > 0).length;
+  }
+
+  return { rows, max: Math.max(...rows.flatMap(r => r.hours), 1) };
+}
+
+/**
+ * 指定した子機の、種別ごとの時系列。詳細表示用。
+ * 子機のイベントは DHCPS と AUTH に跨るため、種別内訳が切り分けの手がかりになる。
+ */
+export function clientTimeline(events, mac, bucketMs, range) {
+  const mine = events.filter(e => e.fields.mac === mac);
+  const series = [
+    { key: 'auth', label: 'Wi-Fi認証', color: '--series-2', test: e => e.kind === 'wifi' },
+    { key: 'dhcp', label: 'DHCP', color: '--series-1', test: e => e.kind === 'dhcp' },
+    { key: 'other', label: 'その他', color: '--series-5', test: e => e.kind !== 'wifi' && e.kind !== 'dhcp' },
+  ].filter(s => mine.some(s.test));
+  return { events: mine, series, bins: timeSeries(mine, bucketMs, series, range) };
+}

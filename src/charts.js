@@ -426,3 +426,138 @@ export function renderHeatmap(container, { events, height = 200 }) {
   scale.appendChild(lbl2);
   container.appendChild(scale);
 }
+
+/**
+ * 子機×時刻のヒートマップ。行=子機、列=0〜23時。
+ * 行をクリックするとその子機の詳細に切り替える（onSelect）。
+ */
+export function renderClientHeatmap(container, { matrix, onSelect, selected }) {
+  container.textContent = '';
+  const { rows, max } = matrix;
+  // 1セルだけ極端に大きいと他が全て最薄になり、差が読めなくなる。
+  // 非ゼロセルの90パーセンタイルを色の上限にし、それ以上は最濃で飽和させる。
+  const nonZero = rows.flatMap(r => r.hours).filter(v => v > 0).sort((a, b) => a - b);
+  const cap = nonZero.length
+    ? Math.max(nonZero[Math.floor(nonZero.length * 0.9)], 1)
+    : 1;
+  if (!rows.length) {
+    const p = document.createElement('div');
+    p.className = 'empty';
+    p.textContent = '子機のイベントがありません。DHCPまたはWi-Fi認証のログが必要です。';
+    container.appendChild(p);
+    return;
+  }
+
+  // 画面が狭いときは名前欄とセルを詰める。それでも収まらない場合は
+  // コンテナ内で横スクロールさせ、body側に溢れさせない。
+  const narrow = container.clientWidth > 0 && container.clientWidth < 560;
+  const pad = { t: 16, r: 10, b: 26, l: narrow ? 96 : 150 };
+  const cellW = narrow ? 18 : 26, cellH = 19, gap = 2;
+  const W = pad.l + 24 * cellW + pad.r;
+  const H = pad.t + rows.length * cellH + pad.b;
+  const svg = el('svg', {
+    class: 'chart', viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: 'img',
+  });
+  // 実寸を維持してスクロールさせる（縮小して潰れるのを防ぐ）。
+  svg.style.minWidth = `${W}px`;
+
+  // 単一色相の逐次スケール（薄い=少ない、濃い=多い）
+  const RAMP = ['#cde2fb', '#9ec5f4', '#6da7ec', '#3987e5', '#256abf', '#184f95', '#0d366b'];
+  const colorOf = v => v ? RAMP[Math.min(RAMP.length - 1, Math.floor((v / cap) * RAMP.length))] : null;
+
+  const tip = document.createElement('div');
+  tip.className = 'tooltip';
+
+  // 時刻の目盛り（上）
+  for (let h = 0; h < 24; h += 3) {
+    const tx = el('text', { x: pad.l + h * cellW + cellW / 2, y: pad.t - 5, 'text-anchor': 'middle' });
+    tx.textContent = `${h}時`;
+    svg.appendChild(tx);
+  }
+
+  rows.forEach((r, i) => {
+    const y = pad.t + i * cellH;
+    const isSel = selected === r.mac;
+
+    // 選択行の帯
+    if (isSel) {
+      svg.appendChild(el('rect', {
+        x: 2, y: y - 1, width: W - 4, height: cellH,
+        fill: 'var(--series-1)', opacity: 0.09, rx: 3,
+      }));
+    }
+
+    // 子機名（クリック可能）
+    const label = el('text', {
+      x: pad.l - 8, y: y + cellH / 2 + 3.5, 'text-anchor': 'end',
+      style: 'cursor:pointer',
+      fill: isSel ? 'var(--text-primary)' : 'var(--text-secondary)',
+      'font-weight': isSel ? '650' : '400',
+    });
+    const name = r.host || r.mac;
+    const maxChars = narrow ? 12 : 20;
+    label.textContent = name.length > maxChars ? name.slice(0, maxChars - 1) + '…' : name;
+    const title = el('title');
+    title.textContent = `${r.host ? r.host + ' / ' : ''}${r.mac}\n合計 ${r.total}件・ピーク ${r.peakHour}時`;
+    label.appendChild(title);
+    label.addEventListener('click', () => onSelect && onSelect(r.mac));
+    svg.appendChild(label);
+
+    for (let h = 0; h < 24; h++) {
+      const v = r.hours[h];
+      const fill = colorOf(v);
+      const cell = el('rect', {
+        x: pad.l + h * cellW + gap / 2, y: y + gap / 2,
+        width: cellW - gap, height: cellH - gap, rx: 3,
+        fill: fill || 'var(--grid)', opacity: fill ? 1 : 0.3,
+        style: 'cursor:pointer',
+      });
+      cell.addEventListener('pointerenter', e => {
+        tip.textContent = '';
+        const head = document.createElement('div');
+        head.className = 'tt-head';
+        head.textContent = `${r.host || r.mac} / ${String(h).padStart(2, '0')}時台`;
+        const row = document.createElement('div');
+        row.className = 'tt-row';
+        const n = document.createElement('span');
+        n.className = 'tt-name';
+        n.textContent = 'イベント';
+        const val = document.createElement('span');
+        val.className = 'tt-val';
+        val.textContent = v.toLocaleString('ja-JP');
+        row.append(n, val);
+        tip.append(head, row);
+        tip.classList.add('on');
+        const cRect = container.getBoundingClientRect();
+        tip.style.left = `${Math.min(Math.max(e.clientX - cRect.left + 12, 4), container.clientWidth - 180)}px`;
+        tip.style.top = `${Math.max(e.clientY - cRect.top - 50, 4)}px`;
+      });
+      cell.addEventListener('pointerleave', () => tip.classList.remove('on'));
+      cell.addEventListener('click', () => onSelect && onSelect(r.mac));
+      svg.appendChild(cell);
+    }
+  });
+
+  container.appendChild(svg);
+  container.appendChild(tip);
+
+  // 凡例
+  const scale = document.createElement('div');
+  scale.className = 'legend';
+  scale.style.marginTop = '10px';
+  const l1 = document.createElement('span');
+  l1.textContent = '少ない';
+  scale.appendChild(l1);
+  for (const c of RAMP) {
+    const k = document.createElement('span');
+    k.className = 'key';
+    k.style.background = c;
+    scale.appendChild(k);
+  }
+  const l2 = document.createElement('span');
+  l2.textContent = cap < max
+    ? `${cap.toLocaleString('ja-JP')}件以上（最大 ${max.toLocaleString('ja-JP')}件）`
+    : `多い（最大 ${max.toLocaleString('ja-JP')}件）`;
+  scale.appendChild(l2);
+  container.appendChild(scale);
+}

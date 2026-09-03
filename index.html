@@ -86,6 +86,37 @@
     </section>
 
     <section class="card">
+      <h2>子機ごとの時間帯別イベント</h2>
+      <p class="sub">行=子機、列=時刻（0〜23時）。全期間を時刻で重ねているため「この子機は毎朝8時に集中している」といった習性が見える。子機名またはマスをクリックすると、その子機の推移に切り替わる。</p>
+      <div class="filters" style="margin-bottom:12px">
+        <label for="client-sort">並べ替え</label>
+        <select id="client-sort">
+          <option value="total">イベント数が多い順</option>
+          <option value="peak">ピーク時刻が早い順</option>
+          <option value="concentration">特定時刻への偏りが大きい順</option>
+          <option value="name">端末名順</option>
+        </select>
+        <label for="client-limit">表示台数</label>
+        <select id="client-limit">
+          <option value="15">上位15台</option>
+          <option value="30" selected>上位30台</option>
+          <option value="60">上位60台</option>
+          <option value="999">すべて</option>
+        </select>
+        <span class="spacer"></span>
+        <button id="client-clear" hidden>選択を解除</button>
+      </div>
+      <div class="chart-wrap" id="chart-client-heatmap"></div>
+
+      <div id="client-detail" hidden>
+        <h2 style="margin-top:22px" id="client-detail-title"></h2>
+        <p class="sub" id="client-detail-sub"></p>
+        <div class="chart-wrap" id="chart-client-timeline"></div>
+        <div class="legend" id="legend-client-timeline"></div>
+      </div>
+    </section>
+
+    <section class="card">
       <h2>曜日・時刻ごとの傾向</h2>
       <p class="sub">「毎朝この時間に落ちる」といった周期性を確認する。</p>
       <div class="chart-wrap" id="chart-heatmap"></div>

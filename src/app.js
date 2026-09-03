@@ -3,9 +3,12 @@
 import { parseLog, EVENT_DEFS } from './parser.js';
 import {
   buildDataset, filterEvents, countByEvent, timeSeries, findAnomalies,
-  diagnose, perClient, dhcpLeaseChurn, fmtDateTime, fmtDur,
+  diagnose, perClient, dhcpLeaseChurn, clientHourMatrix, clientTimeline,
+  fmtDateTime, fmtDur,
 } from './analyze.js';
-import { renderStackedBars, renderLines, renderHeatmap } from './charts.js';
+import {
+  renderStackedBars, renderLines, renderHeatmap, renderClientHeatmap,
+} from './charts.js';
 
 const $ = id => document.getElementById(id);
 
@@ -30,6 +33,10 @@ const state = {
   rangeDays: 'all',
   tab: 'events',
   sort: { events: { col: 'count', dir: -1 }, clients: { col: 'total', dir: -1 } },
+  // 子機ごとの時間帯別ビュー
+  clientSort: 'total',
+  clientLimit: 30,
+  selectedMac: null,
 };
 
 // ---------- ファイル投入 ----------
@@ -176,6 +183,19 @@ function buildFilters() {
     }
     render();
   });
+  $('client-sort').addEventListener('change', e => {
+    state.clientSort = e.target.value;
+    render();
+  });
+  $('client-limit').addEventListener('change', e => {
+    state.clientLimit = +e.target.value;
+    render();
+  });
+  $('client-clear').addEventListener('click', () => {
+    state.selectedMac = null;
+    render();
+  });
+
   for (const tab of document.querySelectorAll('.tab')) {
     tab.addEventListener('click', () => {
       state.tab = tab.dataset.tab;
@@ -282,6 +302,7 @@ function render() {
     renderLegend($('legend-compare'), devSeries, 'line');
   }
 
+  renderClientView(events, range);
   renderHeatmap($('chart-heatmap'), { events });
   renderEventTable(events);
   renderClientTable(events);
@@ -302,6 +323,64 @@ function render() {
     + (ds.preNtpCount ? ` / 時刻同期前の行 ${ds.preNtpCount}行は時間軸から除外` : '')
     + (state.skipped && state.skipped.length
       ? ` / 読み取れず除外: ${state.skipped.join('、')}` : '');
+}
+
+/** 子機×時刻のマトリクスと、選択した子機の詳細を描画する。 */
+function renderClientView(events, range) {
+  const matrix = clientHourMatrix(events, { limit: state.clientLimit });
+
+  // 並べ替え。既定はイベント数だが、周期性を探すときは他の軸が効く。
+  const rows = [...matrix.rows];
+  if (state.clientSort === 'peak') {
+    rows.sort((a, b) => a.peakHour - b.peakHour || b.total - a.total);
+  } else if (state.clientSort === 'concentration') {
+    // 活動時刻数が少ないほど特定の時間帯に偏っている。
+    rows.sort((a, b) => a.activeHours - b.activeHours || b.total - a.total);
+  } else if (state.clientSort === 'name') {
+    rows.sort((a, b) => (a.host || a.mac).localeCompare(b.host || b.mac, 'ja'));
+  }
+
+  // 選択中の子機が現在の絞り込みに存在しなければ選択を解除する。
+  if (state.selectedMac && !rows.some(r => r.mac === state.selectedMac)) {
+    state.selectedMac = null;
+  }
+
+  renderClientHeatmap($('chart-client-heatmap'), {
+    matrix: { rows, max: matrix.max },
+    selected: state.selectedMac,
+    onSelect: mac => {
+      // 同じ子機を再度クリックしたら選択を解除する。
+      state.selectedMac = state.selectedMac === mac ? null : mac;
+      render();
+    },
+  });
+
+  $('client-clear').hidden = !state.selectedMac;
+
+  const detail = $('client-detail');
+  if (!state.selectedMac) {
+    detail.hidden = true;
+    return;
+  }
+  detail.hidden = false;
+
+  const row = rows.find(r => r.mac === state.selectedMac);
+  const { series, bins, events: mine } = clientTimeline(events, state.selectedMac, state.bucketMs, range);
+
+  $('client-detail-title').textContent = `${row.host || '(名前なし)'} の推移`;
+  const ipRow = perClient(events).find(c => c.mac === state.selectedMac);
+  $('client-detail-sub').textContent =
+    `${row.mac}${ipRow && ipRow.ip ? ` / ${ipRow.ip}` : ''}`
+    + ` ・ 合計${row.total.toLocaleString('ja-JP')}件`
+    + ` ・ ピークは${row.peakHour}時台（${row.peakCount}件）`
+    + ` ・ ${row.activeHours}/24 の時刻で活動`
+    + ` ・ ${fmtDateTime(new Date(row.first))}〜${fmtDateTime(new Date(row.last))}`;
+
+  renderStackedBars($('chart-client-timeline'), {
+    bins, series, bucketMs: state.bucketMs,
+    anomalies: findAnomalies(bins, 'total'),
+  });
+  renderLegend($('legend-client-timeline'), series, 'rect');
 }
 
 function renderLegend(container, series, shape) {
@@ -539,8 +618,21 @@ function renderClientTable(events) {
   renderTable($('table-clients'), [
     {
       key: 'host', label: '端末名',
-      render: (td, r) => td.textContent = r.host || '(名前なし)',
       sortVal: r => r.host || 'zzz',
+      render: (td, r) => {
+        // クリックで「子機ごとの時間帯別」の詳細に飛ぶ。
+        const a = document.createElement('button');
+        a.textContent = r.host || '(名前なし)';
+        a.title = 'クリックで時間帯別の推移を表示';
+        a.style.cssText = 'border:0;background:none;padding:0;color:var(--series-1);'
+          + 'text-decoration:underline;text-underline-offset:2px;font-size:inherit;font-family:inherit';
+        a.addEventListener('click', () => {
+          state.selectedMac = r.mac;
+          render();
+          $('client-detail').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+        td.appendChild(a);
+      },
     },
     {
       key: 'ip', label: 'IPアドレス',

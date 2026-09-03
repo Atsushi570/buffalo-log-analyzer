@@ -257,13 +257,23 @@ export function diagnose(dataset, events, bins) {
   const ntpFail = byId('ntp_unknown_host');
   const ntpOk = byId('ntp_ok');
   if (ntpFail.length >= 3) {
+    // 失敗の直後(10分以内)に成功しているかを見る。回復しているなら一時的な
+    // 名前解決の失敗であり、「通信が切れていた」と断定はできない。
+    const recovered = ntpFail.filter(f =>
+      ntpOk.some(ok => ok.t > f.t && ok.t - f.t <= 600_000)).length;
+    const mostlyRecovered = recovered >= ntpFail.length * 0.7;
     findings.push({
-      severity: ntpFail.length > ntpOk.length ? 'error' : 'warn',
+      severity: mostlyRecovered ? 'warn' : 'error',
       kind: 'ntp',
-      title: 'NTPの名前解決が繰り返し失敗している',
-      detail: `${ntpFail.length}回失敗（成功${ntpOk.length}回）。`
-        + `名前解決の失敗はDNS到達不能、すなわちインターネット側との通信が切れている時間帯を示す。`,
-      hint: 'DHCPでの再取得と同時刻に集中していれば、原因は個々の機器ではなく上位回線側。',
+      title: mostlyRecovered
+        ? 'NTPの名前解決が一時的に失敗している'
+        : 'NTPの名前解決が繰り返し失敗し、回復していない',
+      detail: `${ntpFail.length}回失敗（同期成功は${ntpOk.length}回）。`
+        + (mostlyRecovered
+          ? `うち${recovered}回は10分以内に同期成功しており、一時的な失敗にとどまっている。`
+            + `DHCPの再取得直後はDNSが引けずに失敗しやすいため、IP再取得が多い場合はその副作用の可能性が高い。`
+          : `失敗後に同期成功が続かない区間があり、DNSまたは上位回線への到達性に問題がある可能性がある。`),
+      hint: 'DHCPでの再取得と同時刻に集中していれば、NTP失敗は結果であって原因ではない。まずDHCP側を見る。',
       count: ntpFail.length,
     });
   }
@@ -300,7 +310,9 @@ export function diagnose(dataset, events, bins) {
   }
 
   // --- 5. IPプール枯渇 ---
-  const poolEmpty = byId('dhcps_pool_empty');
+  // 「プール未設定」(dhcps_no_pool) は枯渇ではないため、ここでは扱わない。
+  // IPv6をRA/SLAACで配る一般的な構成では正常に出るメッセージ。
+  const poolEmpty = [...byId('dhcps_pool_empty'), ...byId('dhcps_no_free')];
   if (poolEmpty.length) {
     findings.push({
       severity: 'critical',
@@ -351,13 +363,16 @@ export function diagnose(dataset, events, bins) {
     });
   }
 
-  // --- 8. ARPINGエラー（IP競合の兆候）---
+  // --- 8. ARPINGエラー ---
+  // Interrupted system call は除外済み（良性のため）。
   const arping = [...byId('dhcps_arping_err'), ...byId('dhcpc_arping_err')];
   if (arping.length >= 2) {
+    const reasons = [...new Set(arping.map(e => e.fields.detail).filter(Boolean))];
     findings.push({
       severity: 'warn', kind: 'dhcp',
       title: `ARPINGエラーを${arping.length}回検出`,
-      detail: `IPアドレスの重複確認に失敗している。IP競合が起きている可能性がある。`,
+      detail: `IPアドレスの重複確認に失敗している${reasons.length ? `（${reasons.join('、')}）` : ''}。`
+        + `IP競合の可能性があるが、このメッセージ単体では断定できない。`,
       hint: '手動設定したIPがDHCP配布範囲と重なっていないか確認する。',
       count: arping.length,
     });

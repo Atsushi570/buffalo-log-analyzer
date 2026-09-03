@@ -14,7 +14,7 @@ export const EVENT_DEFS = [
   // --- DHCP クライアント側（この機器が上位からIPを貰う動き）---
   { id: 'dhcpc_bound',     cat: 'DHCPC', label: 'IP取得完了 (bound)',      kind: 'dhcp',  severity: 'info',
     re: /^bound to (\S+) -- renewal in (\d+) seconds/ , fields: m => ({ ip: m[1], renewal: +m[2] }) },
-  { id: 'dhcpc_release',   cat: 'DHCPC', label: 'IP解放 (RELEASE)',        kind: 'dhcp',  severity: 'warn',
+  { id: 'dhcpc_release',   cat: 'DHCPC', label: 'IP解放 (RELEASE)',        kind: 'dhcp',  severity: 'info',
     re: /^DHCPRELEASE on (\S+) to (\S+)/, fields: m => ({ iface: m[1], server: m[2] }) },
   { id: 'dhcpc_discover',  cat: 'DHCPC', label: 'IP要求開始 (DISCOVER)',   kind: 'dhcp',  severity: 'info',
     re: /^DHCPDISCOVER on (\S+)/, fields: m => ({ iface: m[1] }) },

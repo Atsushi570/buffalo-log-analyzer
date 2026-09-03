@@ -145,26 +145,45 @@ function median(arr) {
  */
 export function dhcpLeaseChurn(events) {
   const bounds = events.filter(e => e.id === 'dhcpc_bound').sort((a, b) => a.t - b.t);
+  // 自発的なリース返却。これが再取得の直前にあるかで原因の所在が変わる。
+  const releases = events.filter(e => e.id === 'dhcpc_release').sort((a, b) => a.t - b.t);
+  const naks = events.filter(e => e.id === 'dhcpc_nak');
+
   const cycles = [];
   for (let i = 1; i < bounds.length; i++) {
     const prev = bounds[i - 1];
     const gapSec = (bounds[i].t - prev.t) / 1000;
+    // renewal の値は T1（更新開始時刻）。次の更新はこの時間後に来るのが正常。
     const expected = prev.fields.renewal || 0;
+    // 直前(5分以内)に自分がRELEASEを送っていたか。
+    const selfReleased = releases.some(r => r.t > prev.t && r.t < bounds[i].t
+      && bounds[i].t - r.t <= 300_000);
     cycles.push({
       t: bounds[i].t,
       gapSec,
       expected,
+      selfReleased,
       // 想定更新間隔の25%未満で再取得していたら早すぎる＝異常。
       premature: expected > 0 && gapSec < expected * 0.25,
     });
   }
   const premature = cycles.filter(c => c.premature);
+  const selfReleasedCount = premature.filter(c => c.selfReleased).length;
+  const t1 = bounds.length ? median(bounds.map(b => b.fields.renewal || 0)) : 0;
   return {
     bindCount: bounds.length,
     cycles,
     prematureCount: premature.length,
     medianGapSec: median(cycles.map(c => c.gapSec)),
-    expectedSec: bounds.length ? median(bounds.map(b => b.fields.renewal || 0)) : 0,
+    // T1（更新までの時間）。ログに出るのはこの値。
+    t1Sec: t1,
+    // RFC 2131 では T1 = リース期間の約50%。リース期間はログに出ないため推定値。
+    estimatedLeaseSec: t1 ? t1 * 2 : 0,
+    // 早期再取得のうち、自分でRELEASEを送っていた件数。
+    selfReleasedCount,
+    nakCount: naks.length,
+    // 期間中にIPが変わったか（競合や別サブネットへの移動の手がかり）。
+    boundIps: [...new Set(bounds.map(b => b.fields.ip).filter(Boolean))],
   };
 }
 
@@ -237,17 +256,39 @@ export function diagnose(dataset, events, bins) {
       // 実際に発生した日だけを母数にする。
       const days = new Set(churn.cycles.filter(c => c.premature)
         .map(c => new Date(c.t).toDateString()));
-      const perDay = churn.prematureCount / Math.max(days.size, 1);
       const worstDay = worstDayOf(churn.cycles.filter(c => c.premature));
+      // 大半が自発的なRELEASE起点なら、リースを「失った」のではなく「自分で返している」。
+      // 原因の所在（上位側か自機側か）が正反対になるため、必ず区別する。
+      const mostlySelf = churn.selfReleasedCount >= churn.prematureCount * 0.8;
+      const ipStable = churn.boundIps.length === 1;
+
+      const common = `${churn.prematureCount}回、更新予定（T1 約${fmtDur(churn.t1Sec)}`
+        + `／推定リース期間 約${fmtDur(churn.estimatedLeaseSec)}）より極端に早くIPを再取得している`
+        + `（間隔の中央値 ${fmtDur(churn.medianGapSec)}）。`
+        + `発生は${days.size}日間に集中し、最多の日は ${worstDay.date}（${worstDay.count}回）。`;
+
       findings.push({
         severity: churn.prematureCount >= 20 ? 'critical' : 'error',
         kind: 'dhcp',
-        title: `${dev.name}: DHCPリースが保持できていない`,
-        detail: `リース期間は約${fmtDur(churn.expectedSec)}のはずが、${churn.prematureCount}回それより極端に早くIP再取得している`
-          + `（間隔の中央値 ${fmtDur(churn.medianGapSec)}）。`
-          + `発生は${days.size}日間に集中し、最多の日は ${worstDay.date}（${worstDay.count}回）。`
-          + `上位機器との通信断、またはIPアドレス競合が疑われる。`,
-        hint: 'ルーター側のDHCPリース設定と、AP-ルーター間の有線リンク／電波状況を確認する。固定IP化で切り分け可能。',
+        title: mostlySelf
+          ? `${dev.name}: IPの解放と再取得を繰り返している`
+          : `${dev.name}: DHCPリースが保持できていない`,
+        detail: mostlySelf
+          ? common
+            + `うち${churn.selfReleasedCount}回は直前に自機がDHCPRELEASE（自発的なリース返却）を`
+            + `送っており、リースを失ったのではなく自ら返して取り直している。`
+            + (ipStable
+              ? `IPは${churn.boundIps[0]}のまま変わらず、DHCPNAKも${churn.nakCount}件のため、`
+                + `IP競合やサーバ側の拒否は考えにくい。`
+              : '')
+            + `${dev.name}自身でインターフェースの再初期化が繰り返されている可能性が高い。`
+          : common
+            + `DHCPRELEASEを伴わない再取得が主で、リースを保持できていない。`,
+        hint: mostlySelf
+          ? `原因は上位側ではなく${dev.name}自身にある可能性が高い。`
+            + `同時刻の有線リンク断の有無、ファームウェア版数、省電力／無線設定の自動変更、`
+            + `熱やACアダプタの不安定を確認する。同時刻に他機器のログが静かなら自機側を優先して切り分ける。`
+          : 'ルーター側のDHCPリース設定と、機器間の有線リンク／電波状況を確認する。固定IP化で切り分け可能。',
         count: churn.prematureCount,
       });
     }
@@ -298,12 +339,19 @@ export function diagnose(dataset, events, bins) {
     const byPort = {};
     for (const e of linkDown) byPort[e.fields.port] = (byPort[e.fields.port] || 0) + 1;
     const worst = Object.entries(byPort).sort((a, b) => b[1] - a[1]);
+    // リンク断の直後(60秒以内)にDHCPの再取得が起きているかを見る。
+    // 連動していれば、IP再取得の原因が有線側にあると言える。
+    const releases = events.filter(e => e.id === 'dhcpc_release' || e.id === 'dhcpc_discover');
+    const correlated = linkDown.filter(d =>
+      releases.some(r => r.t >= d.t && r.t - d.t <= 60_000)).length;
     findings.push({
       severity: linkDown.length >= 5 ? 'error' : 'warn',
       kind: 'link',
       title: `有線リンクの断を${linkDown.length}回検出`,
       detail: `ポート別: ${worst.map(([p, c]) => `${p} ${c}回`).join('、')}。`
-        + `同一ポートで繰り返していればケーブル／ポート／相手機器側の問題。`,
+        + (correlated
+          ? `うち${correlated}回は直後にDHCPの再取得が続いており、IP再取得の引き金になっている。`
+          : `同一ポートで繰り返していればケーブル／ポート／相手機器側の問題。`),
       hint: 'LANケーブルの差し直しと、別ポートへの差し替えで切り分ける。',
       count: linkDown.length,
     });
@@ -339,14 +387,25 @@ export function diagnose(dataset, events, bins) {
   // 同一MACの短時間での再認証は、電波が不安定で切断・再接続を繰り返す兆候。
   const reauth = repeatedReauth(authOk);
   if (reauth.total >= 5) {
+    // このログには Deauth/Disassoc が記録されないため「切断」の証拠が無い。
+    // 原因を断定せず、分布（1台集中か複数台か）で切り分けを促す。
+    const hasDeauthLog = byId('auth_deauth').length > 0;
+    const topShare = reauth.top.length ? reauth.top[0].count / reauth.total : 0;
+    const concentrated = topShare >= 0.5;
     findings.push({
       severity: reauth.total >= 30 ? 'error' : 'warn',
       kind: 'wifi',
-      title: 'Wi-Fiの再接続が短時間に繰り返されている',
+      title: '短時間に同じ子機の再認証が繰り返されている',
       detail: `5分以内の再認証が${reauth.total}回。`
         + `最多の子機: ${reauth.top.map(c => `${c.host || c.mac}（${c.count}回）`).join('、')}。`
-        + `電波が不安定で切断・再接続を繰り返している可能性がある。`,
-      hint: 'チャンネル干渉、電波の届きにくい場所、または端末の省電力設定を確認する。',
+        + (concentrated
+          ? `全体の${Math.round(topShare * 100)}%が1台に集中している。`
+          : `複数の子機に分散している。`)
+        + (hasDeauthLog ? '' : `このログには切断(Deauth/Disassoc)が記録されないため、`
+          + `切断を伴う再接続か、WPA再キーや省電力からの復帰による記録かは判別できない。`),
+      hint: concentrated
+        ? '1台に集中しているため、まず該当端末の省電力設定・無線ドライバを確認する。AP側の電波環境が原因なら複数台に分散するはず。'
+        : '複数台に分散しているため、チャンネル干渉や電波の届きにくさなどAP側の電波環境を確認する。',
       count: reauth.total,
     });
   }
@@ -379,6 +438,15 @@ export function diagnose(dataset, events, bins) {
   }
 
   // --- 9. 異常時間帯の集中 ---
+  // 機器ごとにログのカバー期間が違う場合、合算した時系列は
+  // 「両方のログがある期間」だけイベント密度が上がり、判定がそこに偏る。
+  const spans = dataset.devices.map(d => {
+    const de = events.filter(e => e.dev === d.idx);
+    return de.length ? (de[de.length - 1].t - de[0].t) / 86400_000 : 0;
+  }).filter(v => v > 0);
+  const spanMismatch = spans.length >= 2
+    && Math.max(...spans) > Math.min(...spans) * 1.5;
+
   const anomalies = findAnomalies(bins, 'total');
   if (anomalies.length) {
     const top = anomalies.slice(0, 3);
@@ -386,7 +454,11 @@ export function diagnose(dataset, events, bins) {
       severity: 'warn', kind: 'other',
       title: `イベントが集中している時間帯が${anomalies.length}区間ある`,
       detail: `最も多い区間: ${top.map(a => `${fmtDateTime(new Date(a.t))}（${a.count}件${ratioText(a.ratio)}）`).join('、')}。`
-        + `平常時の同じ長さの区間では${Math.round(anomalies[0].median)}件程度。`,
+        + `平常時（イベントのある区間）の中央値は${Math.round(anomalies[0].median)}件程度。`
+        + (spanMismatch
+          ? `なお読み込んだログはカバー期間が異なる（最長${Math.round(Math.max(...spans))}日／最短${Math.round(Math.min(...spans))}日）ため、`
+            + `全機器のログが揃っている期間はイベント数が多く出る。機器を1台ずつ選んで確認することを推奨。`
+          : ''),
       hint: 'その時刻に現場で何が起きていたか（電源、天候、利用者数）と突き合わせる。',
       count: anomalies.length,
     });

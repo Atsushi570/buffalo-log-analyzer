@@ -507,13 +507,75 @@ function renderEventTable(events) {
   ], rows, 'events');
 }
 
+/** IPv4 を比較可能な数値にする。並べ替え用。 */
+function ipToNum(ip) {
+  if (!ip) return -1;
+  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(ip);
+  if (!m) return -1;
+  return ((+m[1] * 256 + +m[2]) * 256 + +m[3]) * 256 + +m[4];
+}
+
 function renderClientTable(events) {
   const rows = perClient(events);
+
+  // IPは「その子機の事実」であり、どのログに出ていたかとは別。
+  // AUTH行にはIPが載らないため、機器フィルタで絞っていても
+  // 期間内の全ログからMACを手がかりにIPを補完する。
+  const range = currentRange();
+  const wider = perClient(filterEvents(state.dataset, {
+    ...range, kinds: null, severities: null,
+  }));
+  const ipByMac = new Map(wider.filter(c => c.ip).map(c => [c.mac, c]));
+  for (const r of rows) {
+    if (r.ip) continue;
+    const found = ipByMac.get(r.mac);
+    if (!found) continue;
+    r.ip = found.ip;
+    r.ipConfirmed = found.ipConfirmed;
+    r.ipCount = found.ipCount;
+    r.ipHistory = found.ipHistory;
+    r.ipFromOther = true; // 別のログから補完したことを示す
+  }
   renderTable($('table-clients'), [
     {
       key: 'host', label: '端末名',
       render: (td, r) => td.textContent = r.host || '(名前なし)',
       sortVal: r => r.host || 'zzz',
+    },
+    {
+      key: 'ip', label: 'IPアドレス',
+      // 文字列順だと .9 が .66 より後に来るため、オクテットを数値として並べる。
+      sortVal: r => ipToNum(r.ip),
+      render: (td, r) => {
+        if (!r.ip) {
+          const s = document.createElement('span');
+          s.style.color = 'var(--text-muted)';
+          s.textContent = '—';
+          td.appendChild(s);
+          return;
+        }
+        const s = document.createElement('span');
+        s.className = 'mono';
+        s.textContent = r.ip;
+        if (!r.ipConfirmed) {
+          s.style.color = 'var(--text-muted)';
+          s.title = 'OFFER/REQUEST のみで、ACK による確定を確認できていません';
+        } else if (r.ipFromOther) {
+          // この子機のIPは別のログ（DHCPサーバ側）から判明したもの。
+          s.title = 'このIPは別のログのDHCP記録から判明したものです';
+        }
+        td.appendChild(s);
+        // 期間中にIPが変わっている場合は件数を添える（リース不安定の兆候）。
+        if (r.ipCount > 1) {
+          const b = document.createElement('span');
+          b.className = 'badge warn';
+          b.style.marginLeft = '6px';
+          b.textContent = `${r.ipCount}個`;
+          b.title = r.ipHistory
+            .map(h => `${h.ip}（最終 ${fmtDateTime(new Date(h.last))}）`).join('\n');
+          td.appendChild(b);
+        }
+      },
     },
     {
       key: 'mac', label: 'MACアドレス',

@@ -176,6 +176,9 @@ export function perClient(events) {
     if (!mac) continue;
     const cur = map.get(mac) || {
       mac, host: '', total: 0, auth: 0, dhcpReq: 0, dhcpAck: 0, dhcpRelease: 0, nak: 0,
+      // 期間中に割り当てられたIPを、確定(ACK)したものとそれ以外に分けて保持する。
+      // 同じ子機のIPが期間中に変わるのは、リースが維持できていない兆候。
+      ipHits: new Map(), ipLast: new Map(), ipSeen: new Set(),
       first: e.t, last: e.t,
     };
     if (e.fields.host && !cur.host) cur.host = e.fields.host;
@@ -185,9 +188,32 @@ export function perClient(events) {
     if (e.id === 'dhcps_ack') cur.dhcpAck++;
     if (e.id === 'dhcps_release') cur.dhcpRelease++;
     if (e.id === 'dhcps_nak' || e.id === 'dhcpc_nak') cur.nak++;
+
+    const ip = e.fields.ip;
+    if (ip) {
+      cur.ipSeen.add(ip);
+      // ACK は「実際に確定したIP」。OFFER/REQUEST は候補にとどまるため区別する。
+      if (e.id === 'dhcps_ack') {
+        cur.ipHits.set(ip, (cur.ipHits.get(ip) || 0) + 1);
+        cur.ipLast.set(ip, Math.max(cur.ipLast.get(ip) || 0, e.t));
+      }
+    }
+
     cur.first = Math.min(cur.first, e.t);
     cur.last = Math.max(cur.last, e.t);
     map.set(mac, cur);
+  }
+
+  for (const c of map.values()) {
+    // 最後に確定したIPを代表として見せる。確定が無ければ候補から補う。
+    const acked = [...c.ipLast.entries()].sort((a, b) => b[1] - a[1]);
+    c.ip = acked.length ? acked[0][0] : ([...c.ipSeen][0] || '');
+    c.ipConfirmed = acked.length > 0;
+    c.ipCount = acked.length || c.ipSeen.size;
+    c.ipHistory = acked.length
+      ? acked.map(([ip, t]) => ({ ip, last: t, hits: c.ipHits.get(ip) || 0 }))
+      : [...c.ipSeen].map(ip => ({ ip, last: c.last, hits: 0 }));
+    delete c.ipHits; delete c.ipLast; delete c.ipSeen;
   }
   return [...map.values()].sort((a, b) => b.total - a.total);
 }
